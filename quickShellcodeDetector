@@ -1,0 +1,89 @@
+#!/bin/bash
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+
+if [ "$#" -lt 2 ]; then
+ echo "usage: ${0} <SAMPLE> <DESTINATION>"
+ exit 1
+fi
+echo "Analysing Sample: ${1}"
+
+source "${DIR}/infra/vars.env"
+
+file "${1}" | grep -v DLL | grep PE32 >/dev/null 2>&1
+if [ $? -eq 0 ]
+then
+    TOOLPATH="obj-ia32"
+    CMDLINE="C:\\Users\\${USERNAME}\\Desktop\\$(filename ${1})"
+fi
+
+PINPATH="C:\\${PINVERSION}\\pin.exe"
+
+file "${1}" | grep DLL | grep PE32 >/dev/null 2>&1
+if [ $? -eq 0 ]
+then
+    TOOLPATH="obj-ia32"
+    EXPORTLIST=$(objdump -x "${1}"  |grep '\[Ordinal/Name Pointer\] Table' -A10 | grep -Po '\[[ ]+\K\d\] .+' | tr -d ']')
+    tempfile="$(mktemp)"
+    whiptail --notags --menu 'Which export would you like to test?' 50 100 40 $(echo "${EXPORTLIST}" | tr -s '\n' ' ') 2> "${tempfile}"
+    EXPORT=$(echo "${EXPORTLIST}" | head -$(($(cat "${tempfile}") + 1)) | tail -1 | cut -d' ' -f2)
+    CMDLINE="rundll32 C:\\Users\\${USERNAME}\\Desktop\\$(filename ${1}),${EXPORT}"
+fi
+
+file "${1}" | grep 'PE32+' >/dev/null 2>&1
+if [ $? -eq 0 ]
+then
+    TOOLPATH="obj-intel64"
+    PINPATH="C:\\${PINVERSION}\\intel64\\bin\\pin.exe"
+fi
+
+if [ -z "${TOOLPATH}" ]
+then
+    echo "File unsupported: $(filename ${1})"
+    exit 1
+fi
+
+
+# Fixme retreive available VM
+VMNAME=Node1
+DESTINATION=${2}/$(sha256sum "${1}" | cut -d' ' -f1)
+#start vm
+${VBOXMANAGE} controlvm "${VMNAME}" poweroff
+${VBOXMANAGE} snapshot "${VMNAME}" restore freshinstall
+${VBOXMANAGE} startvm "${VMNAME}" --type headless
+
+sleep 2
+
+set -x
+set -e
+
+waitfordesktop "${USERNAME}" "${USERPASSWORD}"
+
+# Send plugin
+${VBOXMANAGE} guestcontrol "${VMNAME}" --username "${USERNAME}" --password "${USERPASSWORD}" run --exe "C:\\Windows\\System32\\cmd.exe" -- cmd /c mkdir "C:\\${PINVERSION}\\source\\tools\\QuickDetector\\obj-ia32"
+${VBOXMANAGE} guestcontrol "${VMNAME}" --username "${USERNAME}" --password "${USERPASSWORD}" run --exe "C:\\Windows\\System32\\cmd.exe" -- cmd /c mkdir "C:\\Users\\${USERNAME}\\AppData\\Local\\Temp\\ShellCodeDetector"
+${VBOXMANAGE} guestcontrol "${VMNAME}" --username "${USERNAME}" --password "${USERPASSWORD}" run --exe "C:\\Windows\\System32\\cmd.exe" -- cmd /c mkdir "C:\\${PINVERSION}\\source\\tools\\QuickDetector\\obj-intel64"
+${VBOXMANAGE} guestcontrol "${VMNAME}" --username "${USERNAME}" --password "${USERPASSWORD}" copyto --target-directory "C:\\${PINVERSION}\\source\\tools\\QuickDetector\\obj-ia32\\ShellcodeDetector.dll" "${DIR}/QuickDetector/obj-ia32/ShellcodeDetector.dll"
+${VBOXMANAGE} guestcontrol "${VMNAME}" --username "${USERNAME}" --password "${USERPASSWORD}" copyto --target-directory "C:\\${PINVERSION}\\source\\tools\\QuickDetector\\obj-intel64\\ShellcodeDetector.dll" "${DIR}/QuickDetector/obj-intel64/ShellcodeDetector.dll"
+
+# copy the malware
+${VBOXMANAGE} guestcontrol "${VMNAME}" --username "${USERNAME}" --password "${USERPASSWORD}" copyto --target-directory "C:\\Users\\${USERNAME}\\Desktop\\$(filename ${1})" "${1}"
+
+# Run analysis
+set +e
+${VBOXMANAGE} guestcontrol "${VMNAME}" --username "${USERNAME}" --password "${USERPASSWORD}" run --exe "${PINPATH}" -- "${PINPATH}" -logfile "C:\\Users\\${USERNAME}\\AppData\\Local\\Temp\\ShellCodeDetector\\pin.log" -t "C:\\${PINVERSION}\\source\\tools\\QuickDetector\\${TOOLPATH}\\ShellcodeDetector.dll" $3 $4 $6 $7-- ${CMDLINE}
+set -e
+
+# Retreive log file
+mkdir -p "${DESTINATION}"
+for LOGFILE in $(${VBOXMANAGE} guestcontrol "${VMNAME}" --username "${USERNAME}" --password "${USERPASSWORD}" run --exe "C:\\Windows\\System32\\cmd.exe" -- cmd /c dir "C:\\Users\\${USERNAME}\\AppData\\Local\\Temp\\ShellCodeDetector" | grep -Eo '(0x[0-9a-f]+_0x[0-9a-f]+.(bin|dll|exe|log|trc))')
+do
+    ${VBOXMANAGE} guestcontrol "${VMNAME}" --username "${USERNAME}" --password "${USERPASSWORD}" copyfrom --target-directory "${DESTINATION}/${LOGFILE}" "C:\\Users\\${USERNAME}\\AppData\\Local\\Temp\\ShellCodeDetector\\${LOGFILE}"
+done
+${VBOXMANAGE} guestcontrol "${VMNAME}" --username "${USERNAME}" --password "${USERPASSWORD}" copyfrom --target-directory "${DESTINATION}/trace.log" "C:\\Users\\${USERNAME}\\AppData\\Local\\Temp\\ShellCodeDetector\\trace.log"
+# Clean VM
+${VBOXMANAGE} controlvm "${VMNAME}" poweroff
+${VBOXMANAGE} snapshot "${VMNAME}" restore freshinstall
+
+cp "${1}" "${DESTINATION}"
+
+echo "report savec in: ${DESTINATION}"
